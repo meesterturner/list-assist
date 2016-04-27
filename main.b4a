@@ -1,0 +1,767 @@
+﻿Version=4
+IconFile=
+NumberOfModules=2
+Module1=Settings
+Module2=modCore
+Build1=Default,uk.co.blackbubble.listassist
+DoNotOverwriteManifest=False
+ManifestCode='This code will be applied to the manifest file during compilation.~\n~'You do not need to modify it in most cases.~\n~'See this link for for more information: http://www.basic4ppc.com/forum/showthread.php?p=78136~\n~AddManifestText(~\n~<uses-sdk android:minSdkVersion="4" android:targetSdkVersion="14"/>~\n~<supports-screens android:largeScreens="true" ~\n~    android:normalScreens="true" ~\n~    android:smallScreens="true" ~\n~    android:anyDensity="true"/>)~\n~SetApplicationAttribute(android:icon, "@drawable/icon")~\n~SetApplicationAttribute(android:label, "$LABEL$")~\n~SetActivityAttribute(main, android:windowSoftInputMode, adjustResize|stateHidden)~\n~'End of default text.~\n~
+NumberOfFiles=2
+File1=change.png
+File2=settings.bal
+NumberOfLibraries=5
+Library1=core
+Library2=phone
+Library3=sql
+Library4=dialogs
+Library5=ime
+@EndOfDesignText@
+#Region  Project Attributes 
+	#ApplicationLabel: ListAssist
+	' Below needs updating for the Play Store at every upload.
+	#VersionCode: 8
+	' When updating the below, update the equivalents in Process_Globals!
+	#VersionName: 2.3.0
+	#SupportedOrientations: unspecified
+	#CanInstallToExternalStorage: False
+#End Region
+
+#Region  Activity Attributes 
+	#FullScreen: False
+	#IncludeTitle: True
+#End Region
+
+Sub Process_Globals
+	'These global variables will be declared once when the application starts.
+	'These variables can be accessed from all modules.
+	Dim AppTitle As String   = "ListAssist"
+	Dim AppVersion As String = "v2.3.0"
+	
+	
+	Dim RedBull As PhoneWakeState
+	Dim dbConn As SQL
+End Sub
+
+Sub Globals
+	'These global variables will be redeclared each time the activity is created.
+	'These variables can only be accessed from this module.
+	
+	' UI Elements
+	Dim txtEdit As AutoCompleteEditText
+	Dim scrMain As ScrollView
+	Dim lblCount As Label
+	Dim KB As IME
+	
+	
+	' Variables
+	Dim CurrentList As Int
+	Dim CurrentListName As String
+	Dim EditingItem As Int
+	Dim Refreshing As Boolean = False
+	Dim TextboxHeight As Int = 50dip
+	Dim CountHeight As Int = 25dip
+	Dim ACList As List
+End Sub
+
+Sub MinScrollViewSize() As Int
+		Return Activity.Height - TextboxHeight - CountHeight 
+End Sub
+
+Sub Activity_Create(FirstTime As Boolean)
+	' Connect and create the database
+	InitialiseDB
+	
+	' Draw the initial screen
+	' ... Menus
+	Activity.AddMenuItem3("Switch Lists...","mnuChangeList",LoadBitmap(File.DirAssets,"change.png"),True)
+	Activity.AddMenuItem("New List...", "mnuNewList")
+	Activity.AddMenuItem("Rename List...", "mnuRenameList")
+	Activity.AddMenuItem("Untick All", "mnuUntickAll")
+	Activity.AddMenuItem("Delete Ticked Items...","mnuDeleteItems")
+	Activity.AddMenuItem("Delete This List...","mnuDeleteList")
+	Activity.AddMenuItem("Share This List...", "mnuShare")
+	Activity.AddMenuItem("Settings...", "mnuSettings")
+	Activity.AddMenuItem("About","mnuAbout")
+	
+	' ... Input box
+	txtEdit.Initialize("txtEdit")
+	Activity.AddView(txtEdit, 0,0, 100%x,TextboxHeight)
+	txtEdit.Visible=True
+	txtEdit.ForceDoneButton=True
+	txtEdit.InputType = Bit.OR(txtEdit.INPUT_TYPE_TEXT, 16384) 
+	
+	' ... Whilst we're dealing with input, let's initialise the IME handlers
+	KB.Initialize("KB")
+	KB.AddHandleActionEvent(txtEdit)
+	KB.AddHeightChangedEvent
+	
+	' 16384 in above line = Caps on first letter
+	' http://developer.android.com/reference/android/text/InputType.html
+
+	' ... Scrollview (this will contain our items!)
+	scrMain.Initialize(MinScrollViewSize)
+	Activity.AddView(scrMain,0, TextboxHeight, 100%x, MinScrollViewSize)
+	scrMain.Visible = True
+	
+	' ... Item Count label
+	lblCount.Initialize("")
+	Activity.AddView(lblCount, 0, 100%y - CountHeight,100%x, CountHeight)
+	lblCount.Gravity = Gravity.RIGHT
+	lblCount.Text = "0 items"
+	lblCount.TextColor = Colors.rgb(90, 90, 90)
+	lblCount.Visible = True
+	
+	' Load last list
+	ChangeToList(GetMostRecentList)
+	
+	EditingItem = 0
+End Sub
+
+Sub mnuSettings_Click
+	StartActivity(Settings)
+End Sub
+
+Sub mnuShare_Click
+Dim s As Intent
+Dim rs As Cursor
+Dim i As Int
+Dim ShareText As String
+
+	ShareText = CurrentListName & " shared from " & AppTitle & CRLF & CRLF
+	rs = dbConn.ExecQuery2("SELECT * FROM Items WHERE List = ?", Array As String(CurrentList))
+	For i = 0 To rs.RowCount - 1
+		rs.Position = i
+		ShareText = ShareText & "* " & rs.GetString("Description") & CRLF
+	Next
+	rs.Close
+	
+	s.Initialize(s.ACTION_SEND, "")
+	s.SetType("text/plain")
+	s.PutExtra("android.intent.extra.TEXT", ShareText)
+	s.WrapAsIntentChooser("Share via")
+	StartActivity(s)
+End Sub 
+
+Sub GetMostRecentList As Int
+Dim ListID As Int = -1
+Dim rs As Cursor
+
+	rs = dbConn.ExecQuery("SELECT List FROM History ORDER BY HistID DESC LIMIT 1")
+	If rs.RowCount > 0 Then
+		rs.Position = 0
+		ListID = rs.GetInt("List")
+	Else
+		ListID = GetFirstExistingList
+	End If
+	rs.Close
+	
+	Return ListID
+End Sub
+
+Sub GetFirstExistingList As Int
+Dim ListID As Int
+
+	ListID = dbConn.ExecQuerySingleResult("SELECT MIN(ListID) FROM Lists")
+	Return ListID
+End Sub
+
+Sub GetHistoryCount As Int
+Dim Count As Int
+
+	Count = dbConn.ExecQuerySingleResult("SELECT COUNT(*) FROM History")
+	Return Count
+End Sub
+
+Sub Activity_KeyPress (KeyCode As Int) As Boolean 'Return True to consume the event
+Dim HistID As Int
+Dim Result As Boolean
+
+	Result = False ' Default
+	
+	' Deal with the hardware Back button
+	If KeyCode = KeyCodes.KEYCODE_BACK Then
+		If GetHistoryCount <= 1 Then
+			Result = False ' Quit if on only one history left
+		Else
+			HistID = dbConn.ExecQuerySingleResult("SELECT MAX(HistID) FROM History")
+			dbConn.ExecNonQuery2("DELETE FROM History WHERE HistID = ?", Array As String(HistID))
+			ChangeToList(GetMostRecentList)
+			If GetHistoryCount = 1 Then
+				ToastMessageShow("Pressing Back again will exit.", False)
+			End If
+			Result = True
+		End If
+	End If
+	
+	Return Result
+End Sub
+
+Sub mnuAbout_Click
+	Msgbox("(c) 2014-2015 Black Bubble", AppTitle & " " & AppVersion)
+End Sub
+
+Sub mnuChangeList_Click
+	RefreshLists
+End Sub
+
+Sub mnuNewList_Click
+Dim Dia As InputDialog
+Dim Result As Int
+Dim NewID As Int
+Dim NewName As String
+
+	Result = Dia.Show("Please enter the name of the new list", AppTitle, "Ok", "", "Cancel",Null)
+	If Result = DialogResponse.POSITIVE Then
+		NewName = Dia.Input.Trim
+		
+		If NewName = "" Then
+			ToastMessageShow("You did not enter a valid name for the list", False)
+		Else
+			dbConn.ExecNonQuery2("INSERT INTO Lists VALUES (NULL, ?, 0)", Array As String(NewName))
+			NewID = dbConn.ExecQuerySingleResult2("SELECT MAX(ListID) FROM Lists WHERE ListName = ?", Array As String(NewName))
+			ChangeToList(NewID)
+		End If
+	End If
+End Sub
+
+Sub mnuRenameList_Click
+Dim Dia As InputDialog
+Dim Result As Int
+Dim NewName As String
+
+	Result = Dia.Show("Please enter the new name for the list",AppTitle, "Ok", "", "Cancel", Null)
+	If Result = DialogResponse.POSITIVE Then
+		NewName = Dia.Input.Trim
+		
+		If NewName = "" Then
+			ToastMessageShow("You did not enter a valid name for the list", False)
+		Else
+			dbConn.ExecNonQuery2("UPDATE Lists SET ListName = ? WHERE ListID = ?", Array As String(NewName, CurrentList))
+			CurrentListName = NewName
+			txtEdit.Hint = "Add to " & CurrentListName
+		End If
+	End If
+End Sub
+
+Sub mnuUntickAll_Click
+	dbConn.ExecNonQuery2("UPDATE Items SET Ticked = 0 WHERE List = ?", Array As String(CurrentList))
+	RefreshItems
+End Sub
+
+Sub KB_HandleAction As Boolean
+Dim NewID As Int
+   
+   If txtEdit.Text.Trim = "" Then
+		ToastMessageShow("Cannot add a blank item", False)
+	Else
+		If EditingItem = 0 Then
+			NewID = AddToCurrentList(txtEdit.Text)
+			Log("New item ID: " & NewID)
+		Else
+			EditItemInCurrentList(EditingItem, txtEdit.Text)
+			EditingItem = 0
+		End If
+		
+		RefreshItems
+		txtEdit.Text = ""
+		txtEdit.RequestFocus
+	End If
+	
+	Return True
+End Sub
+
+Sub RefreshLists
+Dim i As Int
+Dim rs As Cursor
+Dim MenuList As List
+Dim ListPosition As Int
+Dim ListIDs(999) As Int
+Dim AutoSelect As Int
+
+	AutoSelect = -1
+	MenuList.Initialize
+	
+	rs = dbConn.ExecQuery("SELECT ListID, ListName FROM Lists")
+	For i = 0 To rs.RowCount - 1
+		rs.Position = i
+		MenuList.Add(rs.GetString("ListName"))
+		ListIDs(i) = rs.GetInt("ListID")
+		
+		If ListIDs(i) = CurrentList Then
+			AutoSelect = i
+		End If
+	Next
+	rs.Close
+	
+	ListPosition = InputList(MenuList, "Available Lists", AutoSelect)
+	If ListPosition >= 0 Then
+		ChangeToList(ListIDs(ListPosition))
+	End If
+End Sub
+
+Sub RefreshItems
+Dim i As Int
+Dim rs As Cursor
+Dim ItemHeight As Int = 40dip ' Let's see how this gets on with us!
+Dim TickSize As Int = 40dip
+Dim TotalSize As Int
+Dim Plural As String = ""
+Dim Ordering As String = " ORDER BY "
+
+	Refreshing = True
+	
+	For i = 0 To scrMain.Panel.NumberOfViews - 1
+		scrMain.Panel.RemoveViewAt(0)
+	Next
+	
+	If modCore.LoadSetting("TickedBottom") = "1" Then
+		Ordering = Ordering & "Ticked, ItemID"
+	Else
+		Ordering = Ordering & "ItemID"
+	End If
+	
+	Log("Refresh: " & Ordering)
+	
+	rs = dbConn.ExecQuery2("SELECT * FROM Items WHERE List = ?" & Ordering, Array As String(CurrentList))
+	For i = 0 To rs.RowCount - 1
+		rs.Position = i
+
+		Dim chkItem As CheckBox
+		chkItem.Initialize("chkItem")
+		scrMain.Panel.AddView(chkItem,0, 0 + (i * ItemHeight),TickSize, TickSize)
+		chkItem.Tag = rs.GetString("ItemID")
+		If rs.GetInt("Ticked") = 1 Then
+			chkItem.Checked = True
+		End If
+		chkItem.Gravity=Gravity.TOP
+		chkItem.Visible=True
+		
+		
+		Dim lblItem As Label
+		lblItem.Initialize("lblItem")
+		scrMain.Panel.AddView(lblItem,TickSize + 3dip, 2dip + (i * ItemHeight), scrMain.Panel.Width - (TickSize + 3dip), ItemHeight)
+		lblItem.Tag = rs.GetString("ItemID")
+		lblItem.Text = rs.GetString("Description")
+		
+		lblItem.Visible = True
+		
+		TotalSize = TotalSize + ItemHeight
+	Next
+	If rs.RowCount <> 1 Then
+		Plural = "s"
+	End If
+	
+	lblCount.Text = rs.RowCount & " item" & Plural
+	rs.Close
+	
+	If TotalSize > MinScrollViewSize Then
+		scrMain.Panel.Height = TotalSize
+	Else
+		scrMain.Panel.Height = MinScrollViewSize
+	End If
+	
+	Refreshing = False
+End Sub
+
+Sub chkItem_CheckedChange(Checked As Boolean)
+Dim chkItem As CheckBox
+Dim ItemID As Int
+
+	Log("chkItem_CheckedChange")
+
+	If Refreshing = False Then
+		chkItem = Sender
+		ItemID = chkItem.Tag
+		
+		TickItem(ItemID, Checked)
+		
+		If EditingItem > 0 Then
+			EditingItem = 0
+			txtEdit.Text = ""
+		End If
+		
+		If modCore.LoadSetting("TickedBottom") = "1" Then
+			RefreshItems
+		End If
+	End If
+End Sub
+
+Sub TickItem(ItemID As Int, Ticked As Boolean)
+Dim DBVal As Int = 0
+
+	If Ticked = True Then
+		DBVal = 1
+	End If
+	
+	dbConn.ExecNonQuery2("UPDATE Items SET Ticked = ? WHERE ItemID = ?", Array As String(DBVal, ItemID))
+	Log("TickItem ID " & ItemID & ", Ticked " & Ticked)
+End Sub
+
+Sub Activity_Resume
+	' If the user wants it, let's keep the screen alive
+	If modCore.LoadSetting("KeepAlive") = "1" Then
+		RedBull.KeepAlive(False)
+		Log("LISTASSIST KEEPALIVE ON")
+	Else
+		Log("LISTASSIST KEEPALIVE OFF")
+	End If
+	
+	' Restore the autocomplete after potentially being in settings screen
+	RefreshAutoComplete
+	RefreshItems
+End Sub
+
+Sub Activity_Pause (UserClosed As Boolean)
+	' When the user goes switches apps, we'd like it to allow sleeping!
+	RedBull.ReleaseKeepAlive
+End Sub
+
+Sub lblItem_Click
+Dim lblItem As Label
+
+	lblItem = Sender
+	
+	EditingItem = lblItem.Tag
+	txtEdit.Text = GetItemName(EditingItem)
+	txtEdit.RequestFocus
+	txtEdit.SelectionStart = txtEdit.Text.Length
+End Sub
+
+Sub lblItem_LongClick
+Dim lblItem As Label
+Dim ItemID As Int
+
+	lblItem = Sender
+	ItemID = lblItem.Tag
+	If RemoveFromCurrentList(ItemID)= True Then
+		RefreshItems
+	End If
+End Sub
+
+Sub InitialiseDB
+Dim Folder(2) As String
+Dim UseFolder As String
+Dim Filename As String
+Dim Lists As Int
+Dim IsNew As Boolean
+Dim i As Int
+Dim Connected As Boolean
+Dim CurrentDBVersion As Int
+Dim NewDBVersion As Int
+
+	' Attempt to search SDCard (preferred) or Internal Storage for databse
+	Folder(0) = File.DirDefaultExternal
+	Folder(1) = File.DirInternal
+	Filename = "listassist.db"
+	IsNew = False
+	UseFolder = ""
+	Connected = False
+	
+	For i = 0 To 1
+		If UseFolder = "" Then
+			If File.Exists(Folder(i), Filename) = True Then
+				UseFolder = Folder(i)
+				LogColor("Found database in " & Folder(i),Colors.Green)
+			Else
+				LogColor("Did not find database in " & Folder(i),Colors.RGB(128,0,0))
+			End If
+		End If
+	Next
+	
+	If UseFolder <> "" Then
+		' Open existing database
+		Try
+			LogColor("Trying to open database in " & UseFolder,Colors.DarkGray)
+			dbConn.Initialize(UseFolder, Filename, False)
+			Connected = True
+			Log("Connected was set to True: Open " & UseFolder)
+		Catch
+			LogColor("Open database Failed - " & LastException.Message,Colors.Magenta)
+		End Try
+		
+	Else
+		' Try to create a database in one of the desired locations
+		For i = 0 To 1		
+			Log("Create Database Loop: " & i)
+			Try
+				Log("Create TRY - IsNew = " & IsNew)
+				If IsNew = False AND Connected = False Then
+					LogColor("Trying to create database in " & Folder(i),Colors.DarkGray)
+					dbConn.Initialize(Folder(i),Filename,True)
+					IsNew = True
+					Connected = True
+					Log("Connected was set to True: Create " & i)
+				End If
+			Catch
+				LogColor("Create database Failed - " & LastException.Message,Colors.Magenta)
+				Connected = False
+				IsNew = False
+			End Try
+			Log("Create NEXT")
+		Next
+		
+	End If
+	
+	LogColor("Connected = " & Connected,Colors.DarkGray)
+	
+	If Connected = False Then
+		Msgbox("Database creation or connection failed. Exiting application.", AppTitle)
+		ExitApplication
+	End If
+	
+	' If we created a new database then create original tables!
+	Dim TableDefs As Int = 5
+	Dim DBTables(TableDefs) As String
+	Dim TD As Int
+	
+	' Create current version of DB from scratch
+	' Don't change the array IDs below!
+	DBTables(0) = "CREATE TABLE Lists (ListID INTEGER PRIMARY KEY, ListName TEXT, SysList INTEGER)"
+	DBTables(1) = "CREATE TABLE Items (ItemID INTEGER PRIMARY KEY, List INTEGER, Description TEXT, Ticked INTEGER DEFAULT 0);" & _
+				  "CREATE INDEX idxItemTicked ON Items (Ticked);"
+	DBTables(2) = "CREATE TABLE Settings (SettingName TEXT PRIMARY KEY, SettingData TEXT)"
+	DBTables(3) = "CREATE TABLE AutoComplete (LogID INTEGER PRIMARY KEY, ACText TEXT, List INTEGER);" & _
+				  "CREATE INDEX idxACText ON AutoComplete (ACText);" & _
+				  "CREATE INDEX idxACList ON AutoComplete (List);"
+	DBTables(4) = "CREATE TABLE History (HistID INTEGER PRIMARY KEY, List INT)"
+					  
+	If IsNew = True AND Connected = True Then
+		LogColor("Creating tables in empty database",Colors.DarkGray)
+		
+		For TD = 0 To TableDefs -1
+			dbConn.ExecNonQuery(DBTables(TD))
+		Next
+		
+		' Make the "ticked items at bottom" feature default on new installs
+		modCore.SaveSetting("TickedBottom", "1")
+		
+		modCore.SaveSetting("DBVersion","4")
+		ToastMessageShow("New database created.", False)
+	End If
+	
+	CurrentDBVersion = modCore.LoadSetting("DBVersion")
+	
+	' Apply database upgrades
+	If CurrentDBVersion < 2 Then
+		LogColor("Editing database to Version 2", Colors.DarkGray)
+		dbConn.ExecNonQuery("ALTER TABLE AutoComplete RENAME TO AutoCompleteOLD")
+		dbConn.ExecNonQuery(DBTables(3))
+		dbConn.ExecNonQuery("INSERT INTO AutoComplete (ACText, List) SELECT ACText, List FROM AutoCompleteOLD")
+		dbConn.ExecNonQuery("DROP TABLE AutoCompleteOLD")
+		
+		modCore.SaveSetting("DBVersion","2")
+	End If
+	
+	If CurrentDBVersion < 3 Then
+		LogColor("Editing database to Version 3", Colors.DarkGray)
+		dbConn.ExecNonQuery(DBTables(4))
+		CreateHistory(modCore.LoadSetting("LastListID"))
+		modCore.SaveSetting("DBVersion","3")
+	End If
+	
+	If CurrentDBVersion < 4 Then
+		LogColor("Editing database to Version 4", Colors.DarkGray)
+		dbConn.ExecNonQuery("ALTER TABLE Items ADD COLUMN Ticked INTEGER DEFAULT 0")
+		dbConn.ExecNonQuery("CREATE INDEX idxItemTicked ON Items (Ticked);")
+		modCore.SaveSetting("DBVersion","4")
+	End If
+	
+	NewDBVersion = modCore.LoadSetting("DBVersion")
+	If CurrentDBVersion < NewDBVersion Then
+		ToastMessageShow("Database updated.", False)
+	End If
+	
+	' Create two default lists if they don't exist. Program will definitely crash if there at least isn't one list!
+	' The system list idea has already been abandoned though.
+	Lists = GetListCount
+	If Lists = 0 Then
+		dbConn.ExecNonQuery("INSERT INTO Lists VALUES (NULL, 'Shopping List', 1)")
+		dbConn.ExecNonQuery("INSERT INTO Lists VALUES (NULL, 'ToDo List', 1)")
+	End If
+	
+	If modCore.LoadSetting("AutoComplete") = "" Then
+		modCore.SaveSetting("AutoComplete", "1") ' 1 = per list, 2 = all
+	End If
+	If modCore.LoadSetting("KeepAlive") = "" Then
+		modCore.SaveSetting("KeepAlive", "1")
+	End If
+
+End Sub
+
+Sub GetListCount() As Int
+Dim Lists As Int
+
+	Lists = dbConn.ExecQuerySingleResult("SELECT COUNT(*) FROM Lists")
+	LogColor("GetListCount() = " & Lists,Colors.DarkGray)
+	Return Lists
+End Sub
+
+Sub ChangeToList(ListID As Int)
+	' Make sure the rest of the program knows where we are, and save it in the database to be sure
+	CurrentList = ListID
+	If GetMostRecentList <> ListID Then
+		CreateHistory(ListID)
+	End If
+	CurrentListName = dbConn.ExecQuerySingleResult2("SELECT ListName FROM Lists WHERE ListID = ?", Array As String(ListID))
+	
+	txtEdit.Hint = "Add to " & CurrentListName
+	txtEdit.Text = ""
+	EditingItem=0
+	
+	RefreshItems
+	RefreshAutoComplete
+End Sub
+
+Sub CreateHistory(ListID As Int)
+	dbConn.ExecNonQuery2("INSERT INTO History (List) VALUES (?)", Array As String(ListID))
+End Sub
+
+Sub AddToCurrentList(ItemName As String) As Int
+Dim NewID As Int
+Dim AutoCount As Int
+
+	dbConn.ExecNonQuery2("INSERT INTO Items (List, Description, Ticked) VALUES (?, ?, 0)", Array As String(CurrentList, ItemName))
+	NewID = dbConn.ExecQuerySingleResult2("SELECT MAX(ItemID) FROM Items WHERE List = ?", Array As String(CurrentList))
+	
+	AutoCount = dbConn.ExecQuerySingleResult2("SELECT COUNT(*) FROM AutoComplete WHERE ACText = ? AND List = ?", Array As String(ItemName, CurrentList))
+	If AutoCount = 0 Then
+		dbConn.ExecNonQuery2("INSERT INTO AutoComplete (ACText, List) VALUES (?, ?)", Array As String(ItemName, CurrentList))
+		ACList.Add(ItemName)
+		txtEdit.SetItems(ACList)
+	End If
+	
+	Return NewID
+End Sub
+
+Sub RefreshAutoComplete
+Dim rs As Cursor
+Dim i As Int
+
+	ACList.Initialize
+	
+	If modCore.LoadSetting("AutoComplete") = "1" Then
+		rs = dbConn.ExecQuery2("SELECT ACText FROM AutoComplete WHERE List = ? ORDER BY ACText", Array As String(CurrentList))
+	Else
+		rs = dbConn.ExecQuery("SELECT DISTINCT ACText FROM AutoComplete ORDER BY ACText")
+	End If
+	
+	For i = 0 To rs.RowCount - 1
+		rs.Position = i
+		ACList.Add(rs.GetString("ACText"))
+	Next
+	rs.Close
+	
+	txtEdit.SetItems2(ACList, txtEdit.Typeface,Gravity.LEFT,12, Colors.LightGray)
+End Sub
+
+Sub EditItemInCurrentList(ItemID As Int, NewDescription As String)
+Dim Exists As Int
+	
+	Exists = dbConn.ExecQuerySingleResult2("SELECT COUNT(*) FROM Items WHERE ItemID = ?", Array As String(ItemID))
+	If Exists <> 0 Then
+		dbConn.ExecNonQuery2("UPDATE Items SET Description = ? WHERE ItemID = ?", Array As String(NewDescription, ItemID))
+	Else
+		dbConn.ExecNonQuery2("INSERT INTO Items VALUES (NULL, ?, ?)", Array As String(CurrentList, NewDescription))
+	End If
+End Sub
+
+Sub RemoveFromCurrentList(ItemID As Int) As Boolean
+Dim Deleted As Boolean = False
+Dim Result As Int
+
+	Result = Msgbox2("Do you want to delete the item '" & GetItemName(ItemID) & "'?", AppTitle, "Yes", "", "No", Null)
+	If Result = DialogResponse.POSITIVE Then
+		dbConn.ExecNonQuery2("DELETE FROM Items WHERE ItemID = ?", Array As String(ItemID))
+		If EditingItem = ItemID Then
+			EditingItem = 0
+		End If
+		
+		Deleted = True
+	End If
+	
+	Return Deleted
+End Sub
+
+Sub GetItemName(ItemID As Int) As String
+Dim ItemName As String
+	
+	ItemName = dbConn.ExecQuerySingleResult2("SELECT Description FROM Items WHERE ItemID = ?", Array As String(ItemID))
+	Return ItemName
+End Sub
+
+Sub mnuDeleteList_Click
+	DeleteList(CurrentList)
+End Sub
+
+Sub mnuDeleteItems_Click
+	DeleteTicked(CurrentList)
+End Sub
+
+Sub DeleteTicked(ListID As Int)
+Dim Result As Int
+
+	Result = Msgbox2("Are you sure you want to delete the ticked items in this list?", AppTitle, "Yes", "", "No", Null)
+	If Result = DialogResponse.POSITIVE Then
+		dbConn.ExecNonQuery2("DELETE FROM Items WHERE Ticked = 1 AND List = ?", Array As String(ListID))
+		RefreshItems
+	End If
+End Sub
+
+Sub DeleteList(ListID As Int)
+Dim Result As Int
+Dim DelItems As Boolean
+Dim DelList As Boolean
+Dim MinListID As Int
+
+	DelItems = False
+	DelList = False	
+
+	' Removed concept of System Lists, as long as there is at least one list, the program will survive!
+	If GetListCount < 2 Then
+		Result= Msgbox2("You cannot delete the list itself as this is the only one left." & CRLF & CRLF & "Do you want to delete the items instead?",AppTitle,"Yes","","No", Null)
+		If Result = DialogResponse.POSITIVE Then
+			DelItems = True
+		End If
+	Else
+		Result= Msgbox2("Are you sure you want to delete this list?",AppTitle,"Yes","Just Items","No", Null)
+	
+		If Result = DialogResponse.POSITIVE Then
+			DelItems = True
+			DelList = True
+		Else
+			If Result = DialogResponse.CANCEL Then
+				DelItems = True
+			End If
+		End If
+	End If
+	
+	If DelItems = True OR DelList = True Then
+		' Delete Items - Either of the two positive options will need this anyway
+		dbConn.ExecNonQuery2("DELETE FROM Items WHERE List = ?", Array As String(ListID))
+		
+		' Delete list and autocomplete info if deleting the whole list.
+		If DelList = True Then
+			dbConn.ExecNonQuery2("DELETE FROM AutoComplete WHERE List = ?", Array As String(ListID))
+			dbConn.ExecNonQuery2("DELETE FROM History WHERE List = ?", Array As String(ListID))
+			dbConn.ExecNonQuery2("DELETE FROM Lists WHERE ListID = ?", Array As String(ListID))
+			
+			ToastMessageShow(CurrentListName & " was deleted.", False)
+			
+			' This next line will just find the most recent list it can find in the database
+			MinListID = GetMostRecentList
+			ChangeToList(MinListID)
+		Else
+			RefreshItems
+			ToastMessageShow(CurrentListName & "'s items were deleted.", False)
+		End If
+	End If
+	
+	
+End Sub
+
+Sub txtEdit_ItemClick (Value As String)
+	AddToCurrentList(Value)
+	RefreshItems
+	txtEdit.Text = ""
+	txtEdit.RequestFocus
+End Sub
